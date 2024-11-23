@@ -5,6 +5,8 @@ from tkinter import ttk
 from tkinter import simpledialog
 import mysql.connector
 
+
+
 # Configuración de la conexión a la base de datos
 def conectar_bd():
     try:
@@ -39,6 +41,8 @@ def obtener_productos():
         finally:
             cursor.close()
             conn.close()
+
+
 
 def agregar_producto():
     ventana = Toplevel()
@@ -293,8 +297,26 @@ def agregar_comanda():
         tk.Button(pago_ventana, text="Guardar Pago", command=guardar_pago).pack(pady=10)
         
     def guardar_comanda():
-        id_comanda = id_comanda_entry.get()
+        """
+        Guarda la comanda en la base de datos asegurando que el ID tenga una longitud fija de 8 caracteres con el prefijo "Nª".
+        """
+        id_comanda_raw = id_comanda_entry.get().strip()
+
+        # Validar si los números del ID son numéricos y de longitud 6
+        if not id_comanda_raw.isdigit() or len(id_comanda_raw) != 6:
+            messagebox.showerror("Error", "El ID de la comanda debe ser numérico y contener 6 dígitos.")
+            return
+
+        # Agregar el prefijo "Nª" automáticamente
+        id_comanda = f"Nª{id_comanda_raw}"
+
+        # Actualizar el valor en el campo de entrada para reflejar el formato final
+        id_comanda_entry.delete(0, tk.END)
+        id_comanda_entry.insert(0, id_comanda)
+
         total_comanda = sum([p[3] for p in productos])
+
+        # Validar que el total de pagos coincida con el total de la comanda
         if total_comanda != sum([p[2] for p in pagos]):
             messagebox.showerror("Error", "El total de pagos no coincide con el total de la comanda.")
             return
@@ -303,27 +325,225 @@ def agregar_comanda():
         if conn:
             cursor = conn.cursor()
             try:
+                # Registrar la fecha de cierre de caja si no existe
                 cursor.callproc("VerificarOCrearFechaCierreCaja", (fecha_actual,))
+
+                # Crear la comanda
                 cursor.callproc("CrearComanda", (id_comanda, total_comanda, fecha_actual))
+
+                # Agregar detalles de productos
                 for producto in productos:
                     id_producto, _, cantidad, subtotal = producto
                     cursor.callproc("AgregarDetalleComanda", (id_comanda, id_producto, cantidad, subtotal))
+
+                # Agregar pagos asociados a la comanda
                 for pago in pagos:
                     codigo_tipo_pago, _, monto = pago
                     cursor.callproc("RegistrarPagoComanda", (id_comanda, codigo_tipo_pago, monto))
+
+                # Confirmar transacciones
                 conn.commit()
-                messagebox.showinfo("Éxito", "Comanda guardada exitosamente.")
+                messagebox.showinfo("Éxito", f"Comanda guardada exitosamente con ID: {id_comanda}")
                 ventana.destroy()
             except mysql.connector.Error as e:
-                messagebox.showerror("Error", f"Error al guardar comanda: {e}")
                 conn.rollback()
+                messagebox.showerror("Error", f"Error al guardar comanda: {e}")
             finally:
                 cursor.close()
                 conn.close()
 
+
+
+
     tk.Button(ventana, text="Agregar Producto", command=agregar_producto).pack(pady=10)
     tk.Button(ventana, text="Agregar Pago", command=agregar_pago).pack(pady=10)
     tk.Button(ventana, text="Guardar Comanda", command=guardar_comanda).pack(pady=10)
+
+# Función para obtener el detalle de los productos de una comanda
+def detalle_productos_comanda():
+    """
+    Solicita un ID de comanda y muestra los detalles de los productos de esa comanda.
+    """
+    # Solicitar el ID de la comanda al usuario
+    id_comanda = simpledialog.askstring(
+        "Detalle Productos Comanda",
+        "Ingrese el ID de la comanda (e.g., Nª123456):"
+    )
+    
+    # Validar entrada
+    if not id_comanda or not id_comanda.startswith("Nª") or len(id_comanda) < 8:
+        messagebox.showwarning("Advertencia", "Debe ingresar un ID de comanda válido con el formato 'Nª123456'.")
+        return
+
+    conn = conectar_bd()
+    if conn:
+        cursor = conn.cursor()
+        try:
+            # Llamar al procedimiento almacenado con el ID ingresado
+            cursor.callproc("DetalleProductosPorComanda", (id_comanda,))
+            
+            # Recuperar los resultados
+            datos = None
+            for resultado in cursor.stored_results():
+                datos = resultado.fetchall()
+
+            # Si no hay resultados, mostrar un mensaje
+            if not datos or len(datos) == 0:
+                messagebox.showinfo("Sin resultados", f"No se encontraron productos para la comanda {id_comanda}.")
+                return
+
+            # Crear una ventana para mostrar los resultados
+            ventana_resultados = Toplevel()
+            ventana_resultados.title(f"Detalle de Productos - Comanda {id_comanda}")
+            ventana_resultados.geometry("600x400")
+
+            # Configuración del TreeView
+            columnas = ("Producto", "Cantidad", "Subtotal")
+            tree = ttk.Treeview(ventana_resultados, columns=columnas, show="headings")
+            tree.pack(fill="both", expand=True)
+
+            # Configurar encabezados
+            for col in columnas:
+                tree.heading(col, text=col)
+                tree.column(col, anchor="center", width=150)
+
+            # Insertar los datos obtenidos en el TreeView
+            for fila in datos:
+                tree.insert("", "end", values=fila)
+
+        except mysql.connector.Error as e:
+            messagebox.showerror("Error", f"Error al consultar detalles: {e}")
+        finally:
+            cursor.close()
+            conn.close()
+    else:
+        messagebox.showerror("Error", "No se pudo conectar a la base de datos.")
+
+
+
+
+
+def ventas_por_categoria():
+    """
+    Solicita una categoría al usuario y muestra los productos vendidos que coinciden con esa categoría
+    usando el procedimiento almacenado VentasPorCategoria.
+    """
+    # Solicitar la categoría al usuario
+    categoria = simpledialog.askstring(
+        "Ventas por Categoría",
+        "Ingrese la categoría para buscar (e.g., Cebiches, Arroz, Chicharron, Sudado):"
+    )
+
+    # Validar entrada
+    if not categoria:
+        messagebox.showwarning("Advertencia", "Debe ingresar una categoría para realizar la búsqueda.")
+        return
+
+    conn = conectar_bd()
+    if conn:
+        cursor = conn.cursor()
+        try:
+            # Llamar al procedimiento almacenado con la categoría ingresada
+            cursor.callproc("VentasPorCategoria", (categoria,))
+
+            # Recuperar los resultados
+            datos = None
+            for resultado in cursor.stored_results():
+                datos = resultado.fetchall()
+
+            # Si no hay resultados, mostrar un mensaje
+            if not datos or len(datos) == 0:
+                messagebox.showinfo("Sin resultados", f"No se encontraron productos para la categoría '{categoria}'.")
+                return
+
+            # Crear una ventana para mostrar los resultados
+            ventana_resultados = Toplevel()
+            ventana_resultados.title(f"Ventas por Categoría - {categoria}")
+            ventana_resultados.geometry("600x400")
+
+            # Configuración del TreeView
+            columnas = ("Producto", "Cantidad", "Total")
+            tree = ttk.Treeview(ventana_resultados, columns=columnas, show="headings")
+            tree.pack(fill="both", expand=True)
+
+            # Configurar encabezados
+            for col in columnas:
+                tree.heading(col, text=col)
+                tree.column(col, anchor="center", width=150)
+
+            # Insertar los datos obtenidos en el TreeView
+            for fila in datos:
+                tree.insert("", "end", values=fila)
+
+        except mysql.connector.Error as e:
+            messagebox.showerror("Error", f"Error al consultar ventas por categoría: {e}")
+        finally:
+            cursor.close()
+            conn.close()
+    else:
+        messagebox.showerror("Error", "No se pudo conectar a la base de datos.")
+
+def tipos_pago_por_comanda():
+    """
+    Solicita un ID de comanda al usuario y muestra los tipos de pago asociados a esa comanda
+    usando el procedimiento almacenado TiposPagoPorComanda.
+    """
+    # Solicitar el ID de la comanda al usuario
+    id_comanda = simpledialog.askstring(
+        "Tipos de Pago por Comanda",
+        "Ingrese el ID de la comanda (e.g., Nª123456):"
+    )
+
+    # Validar entrada
+    if not id_comanda or not id_comanda.startswith("Nª") or len(id_comanda) < 8:
+        messagebox.showwarning("Advertencia", "Debe ingresar un ID de comanda válido con el formato 'Nª123456'.")
+        return
+
+    conn = conectar_bd()
+    if conn:
+        cursor = conn.cursor()
+        try:
+            # Llamar al procedimiento almacenado con el ID ingresado
+            cursor.callproc("TiposPagoPorComanda", (id_comanda,))
+
+            # Recuperar los resultados
+            datos = None
+            for resultado in cursor.stored_results():
+                datos = resultado.fetchall()
+
+            # Si no hay resultados, mostrar un mensaje
+            if not datos or len(datos) == 0:
+                messagebox.showinfo("Sin resultados", f"No se encontraron tipos de pago para la comanda {id_comanda}.")
+                return
+
+            # Crear una ventana para mostrar los resultados
+            ventana_resultados = Toplevel()
+            ventana_resultados.title(f"Tipos de Pago - Comanda {id_comanda}")
+            ventana_resultados.geometry("600x400")
+
+            # Configuración del TreeView
+            columnas = ("Tipo de Pago", "Monto")
+            tree = ttk.Treeview(ventana_resultados, columns=columnas, show="headings")
+            tree.pack(fill="both", expand=True)
+
+            # Configurar encabezados
+            for col in columnas:
+                tree.heading(col, text=col)
+                tree.column(col, anchor="center", width=150)
+
+            # Insertar los datos obtenidos en el TreeView
+            for fila in datos:
+                tree.insert("", "end", values=fila)
+
+        except mysql.connector.Error as e:
+            messagebox.showerror("Error", f"Error al consultar tipos de pago: {e}")
+        finally:
+            cursor.close()
+            conn.close()
+    else:
+        messagebox.showerror("Error", "No se pudo conectar a la base de datos.")
+
+
 
 # ============================
 # Funciones de Cierre de Caja
@@ -333,8 +553,6 @@ def cierre_caja():
     ventana = Toplevel()
     ventana.title("Cierre de Caja")
     ventana.geometry("400x300")
-    
-    tk.Button(ventana, text="Eliminar Cierre de Caja", command=eliminar_cierre_caja).pack(pady=10)
 
     fecha_actual = datetime.now().strftime('%Y-%m-%d')
     tk.Label(ventana, text=f"Fecha: {fecha_actual}", font=("Arial", 12)).pack(pady=5)
@@ -343,16 +561,12 @@ def cierre_caja():
     efectivo_veri_entry = tk.Entry(ventana)
     efectivo_veri_entry.pack()
 
-    # Eliminar la entrada de "Total Tarjeta Verificado"
-    # Si deseas ocultarlo por completo, no lo declares aquí
-
     tk.Label(ventana, text="Total Yape Verificado:").pack()
     yape_veri_entry = tk.Entry(ventana)
     yape_veri_entry.pack()
 
     def guardar_cierre():
         try:
-            # Validar y obtener los valores ingresados por el usuario
             efectivo_veri = float(efectivo_veri_entry.get().strip())
             yape_veri = float(yape_veri_entry.get().strip())
         except ValueError:
@@ -364,14 +578,10 @@ def cierre_caja():
             try:
                 cursor = conn.cursor()
                 try:
-                    # Llamar al procedimiento almacenado para registrar el cierre de caja
-                    cursor.callproc("CerrarCaja", (fecha_actual, yape_veri, efectivo_veri, 0))  # 0 en lugar de Tarjeta Verificada manual
+                    cursor.callproc("CerrarCaja", (fecha_actual, yape_veri, efectivo_veri))
                     conn.commit()
 
-                    # Llamar al procedimiento almacenado para consultar los valores del cierre de caja
                     cursor.callproc("ConsultarCierreCaja", (fecha_actual,))
-
-                    # Recuperar los resultados del procedimiento
                     for resultado in cursor.stored_results():
                         resultados = resultado.fetchone()
 
@@ -379,53 +589,43 @@ def cierre_caja():
                         messagebox.showerror("Error", "No se encontraron datos para el cierre de caja en la fecha indicada.")
                         return
 
-                    # Asignar los resultados a variables
                     yape_veri_val, efectivo_veri_val, tarjeta_veri_val, total_veri_val, \
                     yape_comanda_val, efectivo_comanda_val, tarjeta_comanda_val, total_comanda_val = resultados
 
-                    # Actualizar los totales calculados para incluir "Tarjeta Verificada" y "Tarjeta Comanda"
                     total_veri_val = yape_veri_val + efectivo_veri_val + tarjeta_veri_val
                     total_comanda_val = yape_comanda_val + efectivo_comanda_val + tarjeta_comanda_val
 
-                    # Crear una nueva ventana para mostrar resultados
                     resultado_ventana = Toplevel()
                     resultado_ventana.title("Resultados del Cierre de Caja")
                     resultado_ventana.geometry("450x400")
 
-                    # Crear un marco para mostrar los resultados
                     frame = tk.Frame(resultado_ventana)
                     frame.pack(pady=10)
 
-                    # Función para determinar el color según si los valores coinciden o no
                     def obtener_color(veri, comanda):
                         return "green" if veri == comanda else "red"
 
-                    # Mostrar los valores en la ventana con colores
                     tk.Label(frame, text="Valores Verificados y Calculados", font=("Arial", 14, "bold")).pack(pady=5)
 
-                    # Mostrar Yape
                     tk.Label(frame, text=f"Yape Verificado: {yape_veri_val:.2f}",
-                            fg=obtener_color(yape_veri_val, yape_comanda_val)).pack(anchor="w")
+                             fg=obtener_color(yape_veri_val, yape_comanda_val)).pack(anchor="w")
                     tk.Label(frame, text=f"Yape Comanda: {yape_comanda_val:.2f}",
-                            fg=obtener_color(yape_veri_val, yape_comanda_val)).pack(anchor="w")
+                             fg=obtener_color(yape_veri_val, yape_comanda_val)).pack(anchor="w")
 
-                    # Mostrar Efectivo
                     tk.Label(frame, text=f"Efectivo Verificado: {efectivo_veri_val:.2f}",
-                            fg=obtener_color(efectivo_veri_val, efectivo_comanda_val)).pack(anchor="w")
+                             fg=obtener_color(efectivo_veri_val, efectivo_comanda_val)).pack(anchor="w")
                     tk.Label(frame, text=f"Efectivo Comanda: {efectivo_comanda_val:.2f}",
-                            fg=obtener_color(efectivo_veri_val, efectivo_comanda_val)).pack(anchor="w")
+                             fg=obtener_color(efectivo_veri_val, efectivo_comanda_val)).pack(anchor="w")
 
-                    # Mostrar Tarjeta
                     tk.Label(frame, text=f"Tarjeta Verificada: {tarjeta_veri_val:.2f}",
-                            fg=obtener_color(tarjeta_veri_val, tarjeta_comanda_val)).pack(anchor="w")
+                             fg=obtener_color(tarjeta_veri_val, tarjeta_comanda_val)).pack(anchor="w")
                     tk.Label(frame, text=f"Tarjeta Comanda: {tarjeta_comanda_val:.2f}",
-                            fg=obtener_color(tarjeta_veri_val, tarjeta_comanda_val)).pack(anchor="w")
+                             fg=obtener_color(tarjeta_veri_val, tarjeta_comanda_val)).pack(anchor="w")
 
-                    # Mostrar Total
                     tk.Label(frame, text=f"Total Verificado: {total_veri_val:.2f}",
-                            fg=obtener_color(total_veri_val, total_comanda_val)).pack(anchor="w")
+                             fg=obtener_color(total_veri_val, total_comanda_val)).pack(anchor="w")
                     tk.Label(frame, text=f"Total Comanda: {total_comanda_val:.2f}",
-                            fg=obtener_color(total_veri_val, total_comanda_val)).pack(anchor="w")
+                             fg=obtener_color(total_veri_val, total_comanda_val)).pack(anchor="w")
 
                 except mysql.connector.Error as e:
                     conn.rollback()
@@ -434,9 +634,38 @@ def cierre_caja():
                 cursor.close()
         conn.close()
 
-
     tk.Button(ventana, text="Guardar Cierre de Caja", command=guardar_cierre).pack(pady=10)
 
+
+
+
+def registrar_reporte_tarjetas(id_cierre_tarjetas, fecha, hora, total_credito, total_debito, total_soles, fecha_cierre_de_caja, id_local):
+    """
+    Llama al procedimiento almacenado para registrar o actualizar un reporte de tarjetas.
+    """
+    conn = conectar_bd()  # Función para conectar a la base de datos
+    if conn:
+        cursor = conn.cursor()
+        try:
+            # Llamar al procedimiento almacenado
+            cursor.callproc("RegistrarOActualizarReporteTarjetas", (
+                id_cierre_tarjetas,
+                fecha,
+                hora,
+                total_credito,
+                total_debito,
+                total_soles,
+                fecha_cierre_de_caja,
+                id_local
+            ))
+            conn.commit()
+            print("El reporte de tarjetas fue registrado o actualizado correctamente.")
+        except mysql.connector.Error as e:
+            conn.rollback()
+            print(f"Error al registrar o actualizar el reporte de tarjetas: {e}")
+        finally:
+            cursor.close()
+            conn.close()
 
 
 # ============================
@@ -698,7 +927,7 @@ def consulta_totales():
             cursor = conn.cursor()
             try:
                 # Llamar al procedimiento almacenado
-                cursor.callproc("ConsultarTotalesPorTipoPago", (fecha_inicio, fecha_fin, None))
+                cursor.callproc("ConsultarTotalesPorTipoPago", (fecha_inicio, fecha_fin))
 
                 # Recuperar el resultado de la consulta
                 for resultado in cursor.stored_results():
@@ -716,6 +945,7 @@ def consulta_totales():
 
     # Botón para ejecutar la consulta
     tk.Button(ventana, text="Consultar", command=calcular_totales).pack(pady=10)
+
 
            
 def ver_comandas_del_dia():
@@ -767,22 +997,235 @@ def ver_comandas_del_dia():
             cursor.close()
             conn.close()
 
-          
-# Configuración de la interfaz principal
+def mostrar_carta():
+    """
+    Muestra los productos disponibles en la base de datos.
+    """
+    conn = conectar_bd()  # Conexión a la base de datos
+    if conn:
+        cursor = conn.cursor()
+        try:
+            # Consulta para obtener los productos
+            cursor.execute("SELECT id_producto, descripcion_producto, precio_unitario_producto FROM producto")
+            productos = cursor.fetchall()
+
+            # Crear una ventana para mostrar la carta
+            ventana_carta = Toplevel()
+            ventana_carta.title("Carta de Productos")
+            ventana_carta.geometry("600x400")
+
+            # Configuración del Treeview
+            columnas = ("ID Producto", "Descripción", "Precio Unitario")
+            tree = ttk.Treeview(ventana_carta, columns=columnas, show="headings")
+            tree.pack(fill="both", expand=True, pady=10, padx=10)
+
+            # Configurar encabezados
+            for col in columnas:
+                tree.heading(col, text=col)
+                tree.column(col, anchor="center", width=150)
+
+            # Insertar los datos obtenidos en el Treeview
+            for producto in productos:
+                tree.insert("", "end", values=producto)
+
+            # Botón para cerrar la ventana
+            tk.Button(ventana_carta, text="Cerrar", command=ventana_carta.destroy).pack(pady=10)
+
+        except mysql.connector.Error as e:
+            messagebox.showerror("Error", f"Error al obtener los productos: {e}")
+        finally:
+            cursor.close()
+            conn.close()
+    else:
+        messagebox.showerror("Error", "No se pudo conectar a la base de datos.")
+
+# Función para ejecutar un procedimiento almacenado y mostrar los resultados
+def ejecutar_procedimiento(nombre_proc, params=()):
+    conn = conectar_bd()
+    if conn:
+        cursor = conn.cursor()
+        try:
+            cursor.callproc(nombre_proc, params)
+            for resultado in cursor.stored_results():
+                datos = resultado.fetchall()
+            # Crear una nueva ventana para mostrar resultados
+            ventana_resultados = Toplevel()
+            ventana_resultados.title(f"Resultados: {nombre_proc}")
+            ventana_resultados.geometry("600x400")
+
+            # Tabla para mostrar los datos
+            columnas = [desc[0] for desc in resultado.description]
+            tree = ttk.Treeview(ventana_resultados, columns=columnas, show="headings")
+            tree.pack(fill="both", expand=True)
+
+            # Configurar encabezados
+            for col in columnas:
+                tree.heading(col, text=col)
+                tree.column(col, width=150, anchor="center")
+
+            # Insertar datos
+            for fila in datos:
+                tree.insert("", "end", values=fila)
+
+        except mysql.connector.Error as e:
+            messagebox.showerror("Error", f"Error al ejecutar procedimiento: {e}")
+        finally:
+            cursor.close()
+            conn.close()
+# Botones para cada reporte
+botones_reportes = [
+    ("Consulta Totales", consulta_totales),
+    ("Ver Comandas del Día", ver_comandas_del_dia),
+    ("Productos Más Vendidos", lambda: ejecutar_procedimiento("ProductosMasVendidos")),
+    ("Cierres Caja Desajustes", lambda: ejecutar_procedimiento("CierresCajaDesajustes")),
+    ("Detalle Productos Comanda", detalle_productos_comanda),
+    ("Consumo Promedio Comanda", lambda: ejecutar_procedimiento("ConsumoPromedioComanda")),
+    ("Ventas por Categoría", ventas_por_categoria),
+    ("Ventas Mensuales Totales", lambda: ejecutar_procedimiento("VentasMensualesTotales")),
+   ("Tipos Pago por Comanda", tipos_pago_por_comanda),
+    ("Total por Método Pago por Mes", lambda: ejecutar_procedimiento("TotalPorMetodoPagoMes")),
+]
+
+# Configuración de la interfaz principal con estilos personalizados
 root = tk.Tk()
-root.title("Gestión de Comandas y Cierre de Caja")
-root.geometry("300x250")
+root.title("Gestión de Comandas y Caja")
+root.geometry("1000x700")  # Ajusta el tamaño para más espacio
 
-tk.Button(root, text="Agregar Comanda", command=agregar_comanda).pack(pady=10)
-tk.Button(root, text="Cierre de Caja", command=cierre_caja).pack(pady=10)
-tk.Button(root, text="Consulta Totales por Rango", command=consulta_totales).pack(pady=10)
-tk.Button(root, text="Ver Comandas del Día", command=ver_comandas_del_dia).pack(pady=10)
-tk.Button(root, text="Eliminar Comanda", command=eliminar_comanda).pack(pady=10)
-tk.Button(root, text="Agregar Producto", command=agregar_producto).pack(pady=5)
-tk.Button(root, text="Eliminar Producto", command=eliminar_producto).pack(pady=5)
-tk.Button(root, text="Actualizar Producto", command=actualizar_producto).pack(pady=5)
-tk.Button(root, text="Gestionar Reporte Tarjetas", command=gestionar_reporte_tarjetas).pack(pady=10)
+# Estilo global
+titulo_font = ("Arial", 18, "bold")
+boton_font = ("Arial", 12, "bold")
+boton_bg_color = "#1E90FF"  # Azul
+boton_fg_color = "white"
+boton_active_bg = "#FFA500"  # Naranja activo
+boton_active_fg = "black"
+
+# Crear un Frame principal para organizar todo
+main_frame = tk.Frame(root, bg="#2C2C2C")
+main_frame.pack(fill="both", expand=True)
+
+# Título principal
+titulo_label = tk.Label(
+    main_frame,
+    text="Gestión de Comandas y Caja",
+    font=titulo_font,
+    bg="#2C2C2C",
+    fg="#1E90FF"
+)
+titulo_label.pack(pady=10)
+
+# Crear un Frame para los grupos principales (comandas, productos, caja)
+grupos_frame = tk.Frame(main_frame, bg="#2C2C2C")
+grupos_frame.pack(fill="both", pady=20)  
 
 
+# Crear cada grupo en un Frame separado
+grupos = [
+    ("Gestión de Comandas", [
+        ("Agregar Comanda", agregar_comanda),
+        ("Eliminar Comanda", eliminar_comanda),
+    ]),
+    ("Gestión de Productos", [
+        ("Carta", mostrar_carta), 
+        ("Agregar Producto", agregar_producto),
+        ("Eliminar Producto", eliminar_producto),
+        ("Actualizar Producto", actualizar_producto),
+    ]),
+    ("Gestión de Caja", [
+        ("Cierre de Caja", cierre_caja),
+        ("Gestionar Reporte Tarjetas", gestionar_reporte_tarjetas),
+    ]),
+]
+
+# Ajustar los paneles en filas y columnas para centrar
+for col, (titulo_grupo, botones) in enumerate(grupos):
+    grupo_frame = tk.LabelFrame(
+        grupos_frame,
+        text=titulo_grupo,
+        font=("Arial", 14, "bold"),
+        bg="#2C2C2C",
+        fg="white",
+        bd=2,
+        relief="groove",
+        labelanchor="n"
+    )
+    grupo_frame.grid(row=0, column=col, padx=10, pady=10, sticky="n")
+
+    # Añadir los botones al grupo
+    for texto, comando in botones:
+        boton = tk.Button(
+            grupo_frame,
+            text=texto,
+            command=comando,
+            font=boton_font,
+            bg=boton_bg_color,
+            fg=boton_fg_color,
+            activebackground=boton_active_bg,
+            activeforeground=boton_active_fg,
+            width=25,
+            height=3,
+            padx=10,
+            pady=5
+        )
+        boton.pack(pady=10, padx=15)
+
+# Centrar los paneles horizontales en la fila
+grupos_frame.grid_columnconfigure(0, weight=1)  # Columna izquierda
+grupos_frame.grid_columnconfigure(1, weight=1)  # Columna del centro
+grupos_frame.grid_columnconfigure(2, weight=1)  # Columna derecha
+
+
+# Crear un apartado para los "Reportes" en una fila aparte
+reportes_frame = tk.LabelFrame(
+    main_frame,
+    text="Reportes",
+    font=("Arial", 14, "bold"),
+    bg="#2C2C2C",
+    fg="white",
+    bd=2,
+    relief="groove",
+    labelanchor="n"
+)
+reportes_frame.pack(fill="both", padx=10, pady=20)
+
+# Crear un Frame con un Scrollbar para los reportes
+canvas = tk.Canvas(reportes_frame, bg="#2C2C2C")
+scrollbar = ttk.Scrollbar(reportes_frame, orient="vertical", command=canvas.yview)
+scrollable_frame = tk.Frame(canvas, bg="#2C2C2C")
+
+scrollable_frame.bind(
+    "<Configure>",
+    lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+)
+
+canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+canvas.configure(yscrollcommand=scrollbar.set)
+
+# Empaquetar el canvas y el scrollbar
+canvas.pack(side="left", fill="both", expand=True)
+scrollbar.pack(side="right", fill="y")
+
+# Colocar los botones de "Reportes" en un grid dentro del scrollable_frame
+for i, (texto, comando) in enumerate(botones_reportes):
+    fila = i // 5  # Hasta 5 botones por fila
+    columna = i % 5
+    boton = tk.Button(
+        scrollable_frame,
+        text=texto,
+        command=comando,
+        font=boton_font,
+        bg=boton_bg_color,
+        fg=boton_fg_color,
+        activebackground=boton_active_bg,
+        activeforeground=boton_active_fg,
+        width=22,  # Aumenta el ancho
+        height=3,  # Aumenta el alto para más espacio
+        padx=10,  # Espaciado interno horizontal
+        pady=5   # Espaciado interno vertical
+    )
+    boton.grid(row=fila, column=columna, padx=15, pady=15)  # Ajusta los márgenes externos
+
+# Ajustar las columnas en "Reportes" para que ocupen espacio uniformemente
+for col in range(5):
+    scrollable_frame.columnconfigure(col, weight=1)
 
 root.mainloop()
